@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import type { ScoredPost, Platform } from '../types';
+import { detectSports, detectRegions, getAudienceProfile, scoreAudience, type Sport, type Region } from '../audience/intelligence';
 
 let anthropic: Anthropic | null = null;
 
@@ -50,10 +51,67 @@ Key rules:
   }
 }
 
+function buildAudienceGuidance(post: ScoredPost): string {
+  const sports = post.relevance.detectedSports as Sport[];
+  const regions = post.relevance.detectedRegions as Region[];
+  const primarySport = sports[0] || 'general';
+  const profile = getAudienceProfile(primarySport);
+  const audience = scoreAudience(post);
+
+  const regionLabels: Record<Region, string> = {
+    US: 'American', CA: 'Canadian', UK: 'British',
+    IE: 'Irish', IN: 'Indian', AU: 'Australian', GLOBAL: 'global',
+  };
+
+  const regionStr = regions.map(r => regionLabels[r] || r).join('/');
+
+  // Build terminology guide
+  const termGuide = Object.entries(profile.terminology)
+    .map(([from, to]) => `- Say "${to}" NOT "${from}"`)
+    .join('\n');
+
+  return `
+AUDIENCE INTELLIGENCE:
+- Detected sport(s): ${sports.join(', ')}
+- Target audience: ${regionStr}
+- ${profile.culturalNotes}
+
+${termGuide ? `TERMINOLOGY — Use the RIGHT words for this audience:\n${termGuide}` : 'No specific terminology adjustments needed.'}
+
+IMPORTANT: Getting the language wrong instantly marks you as an outsider. A British football punter will ignore anyone who says "soccer" or "parlay". An American NBA bettor will ignore anyone who says "accumulator" or "bookmaker". Match the audience exactly.`;
+}
+
+function buildSportsContext(post: ScoredPost): string {
+  const sports = post.relevance.detectedSports as Sport[];
+
+  if (sports.includes('general') || sports.length === 0) {
+    return 'This is a general sports betting post — no specific sport detected.';
+  }
+
+  const sportDescriptions: Partial<Record<Sport, string>> = {
+    nba: 'NBA basketball — reference player props, spreads, totals, team matchups',
+    nhl: 'NHL hockey — reference puck lines, goalie matchups, back-to-backs',
+    nfl: 'NFL football — reference spreads, ATS, injury reports, game scripts',
+    mlb: 'MLB baseball — reference starting pitchers, run lines, park factors',
+    football: 'Football (soccer) — reference accumulators, BTTS, over/under goals, league-specific form',
+    cricket: 'Cricket — reference pitch conditions, batting/bowling stats, format (T20/ODI/Test)',
+    tennis: 'Tennis — reference surface, H2H records, recent form, tournament context',
+    mma: 'MMA/UFC — reference fighting styles, reach, weight cuts, method of victory',
+    boxing: 'Boxing — reference fight camps, styles, method of victory, round betting',
+    horse_racing: 'Horse racing — reference going, trainer/jockey, course form, each way value',
+  };
+
+  return sports
+    .map(s => sportDescriptions[s] || `${s} detected`)
+    .join('\n');
+}
+
 export async function generateDrafts(post: ScoredPost): Promise<{ primary: string; alternate?: string }> {
   const invite = getDiscordInvite(post.platform);
   const guidance = getPlatformGuidance(post.platform);
   const intentContext = post.relevance.intentLabel;
+  const audienceGuidance = buildAudienceGuidance(post);
+  const sportsContext = buildSportsContext(post);
 
   const postContent = post.platform === 'twitter'
     ? post.body
@@ -63,9 +121,15 @@ export async function generateDrafts(post: ScoredPost): Promise<{ primary: strin
 
 ${guidance}
 
+${audienceGuidance}
+
+SPORT CONTEXT:
+${sportsContext}
+
 Context about the Discord community you can mention IF it fits naturally:
 - Multi-sport, data-backed betting signals community
 - Free tier with premium option
+- Covers: NBA, NHL, football (soccer), cricket, tennis, and more
 - Focus: using data and analysis rather than gut feelings
 - Invite link (only include if mentioning): ${invite}
 
@@ -76,7 +140,8 @@ CRITICAL RULES:
 2. Only mention the Discord if it's a natural fit. If the post is asking for communities/signals, it fits. If it's general discussion, contribute without mentioning it.
 3. Never say "check out", "join", "visit", "click here", or any call-to-action language.
 4. Never claim specific win rates, ROI, or profits unless you can back them up.
-5. Sound like a real person who bets and is part of a community, not someone promoting one.`;
+5. Sound like a real person who bets and is part of a community, not someone promoting one.
+6. USE THE CORRECT TERMINOLOGY FOR THE AUDIENCE. This is non-negotiable. Wrong terminology = instant credibility loss.`;
 
   try {
     const response = await getClient().messages.create({

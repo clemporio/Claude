@@ -29,7 +29,9 @@ async function processPosts(posts: RawPost[]): Promise<void> {
         continue;
       }
 
-      const combinedScore = (relevance.total + opportunity.total) / 2;
+      // Normalise: relevance is 0-100, opportunity is 0-125 (with audience bonus)
+      // Combined score is weighted average, normalised to 0-100
+      const combinedScore = (relevance.total * 0.45) + (Math.min(opportunity.total, 125) / 125 * 100 * 0.55);
 
       // Store opportunity
       const oppId = insertOpportunity({

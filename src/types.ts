@@ -25,6 +25,8 @@ export interface RelevanceScore {
   freshness: number;        // 0-20
   total: number;            // 0-100
   intentLabel: string;      // e.g. "seeking_tips", "sharing_picks", "complaining"
+  detectedSports: string[];
+  detectedRegions: string[];
 }
 
 export interface OpportunityScore {
@@ -32,7 +34,8 @@ export interface OpportunityScore {
   engagement: number;       // 0-25
   positioningFit: number;   // 0-25
   competition: number;      // 0-25
-  total: number;            // 0-100
+  audienceBonus: number;    // 0-25: timing + terminology fit from audience intelligence
+  total: number;            // 0-125 (normalised to 0-100 in combined score)
 }
 
 export interface ScoredPost extends RawPost {

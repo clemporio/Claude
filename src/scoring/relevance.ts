@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config';
 import type { RawPost, RelevanceScore } from '../types';
+import { detectSports, detectRegions } from '../audience/intelligence';
 
 let anthropic: Anthropic | null = null;
 
@@ -120,6 +121,8 @@ export async function scoreRelevance(post: RawPost): Promise<RelevanceScore> {
   const topic = scoreTopicMatch(text);
   const freshness = scoreFreshness(post.createdAt);
   const intent = await classifyIntent(post);
+  const sports = detectSports(post);
+  const regions = detectRegions(post);
 
   return {
     keyword,
@@ -128,5 +131,7 @@ export async function scoreRelevance(post: RawPost): Promise<RelevanceScore> {
     freshness,
     total: keyword + intent.score + topic + freshness,
     intentLabel: intent.label,
+    detectedSports: sports,
+    detectedRegions: regions,
   };
 }

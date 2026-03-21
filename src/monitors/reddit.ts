@@ -2,6 +2,7 @@ import Snoowrap from 'snoowrap';
 import { config } from '../config';
 import type { RawPost } from '../types';
 import { opportunityExists } from '../queue/queue';
+import { getPrioritySubredditsNow, getActiveSubreddits } from '../audience/intelligence';
 
 let client: Snoowrap | null = null;
 
@@ -28,9 +29,16 @@ export async function scanReddit(): Promise<RawPost[]> {
   const now = Date.now();
   const maxAge = config.reddit.maxPostAge;
 
-  console.log(`[Reddit] Scanning ${config.reddit.subreddits.length} subreddits...`);
+  // Use audience intelligence to pick subreddits based on time of day
+  const prioritySubs = getPrioritySubredditsNow();
+  const allSubs = getActiveSubreddits();
 
-  for (const sub of config.reddit.subreddits) {
+  // Scan priority subs (active audiences now) + always scan general subs
+  const subsToScan = Array.from(new Set([...prioritySubs, ...config.reddit.subreddits]));
+
+  console.log(`[Reddit] Scanning ${subsToScan.length} subreddits (${prioritySubs.length} priority for current time)...`);
+
+  for (const sub of subsToScan) {
     try {
       const newPosts = await r.getSubreddit(sub).getNew({ limit: 25 });
 

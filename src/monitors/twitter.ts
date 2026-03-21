@@ -2,6 +2,7 @@ import { TwitterApi } from 'twitter-api-v2';
 import { config } from '../config';
 import type { RawPost } from '../types';
 import { opportunityExists } from '../queue/queue';
+import { getActiveTwitterKeywords, getActiveTwitterHashtags } from '../audience/intelligence';
 
 let client: TwitterApi | null = null;
 
@@ -16,15 +17,29 @@ function getClient(): TwitterApi {
 }
 
 function buildSearchQuery(): string {
-  const keywordParts = config.twitter.keywords
+  // Merge config keywords with audience-driven keywords
+  const allKeywords = new Set([
+    ...config.twitter.keywords,
+    ...getActiveTwitterKeywords(),
+  ]);
+  const allHashtags = new Set([
+    ...config.twitter.hashtags,
+    ...getActiveTwitterHashtags(),
+  ]);
+
+  // Twitter API has a query length limit (~512 chars for free tier)
+  // Prioritise the first batch, rotate through the rest
+  const keywordArr = Array.from(allKeywords).slice(0, 15);
+  const hashtagArr = Array.from(allHashtags).slice(0, 10);
+
+  const keywordParts = keywordArr
     .map(k => `"${k}"`)
     .join(' OR ');
 
-  const hashtagParts = config.twitter.hashtags
+  const hashtagParts = hashtagArr
     .map(h => `#${h}`)
     .join(' OR ');
 
-  // Exclude retweets, require English
   return `(${keywordParts} OR ${hashtagParts}) lang:en -is:retweet`;
 }
 
