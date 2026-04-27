@@ -1,16 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { config } from '../config';
 import type { RawPost, RelevanceScore } from '../types';
 import { detectSports, detectRegions } from '../audience/intelligence';
-
-let anthropic: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!anthropic) {
-    anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
-  }
-  return anthropic;
-}
 
 const BETTING_KEYWORDS = [
   'betting signals', 'betting tips', 'sports picks', 'free picks',
@@ -33,18 +22,15 @@ function scoreKeywords(text: string): number {
   for (const kw of BETTING_KEYWORDS) {
     if (lower.includes(kw)) matches++;
   }
-  // Scale: 0 matches = 0, 1 = 10, 2 = 18, 3+ = 24-30
   return Math.min(30, matches * 8);
 }
 
 function scoreTopicMatch(text: string): number {
   const lower = text.toLowerCase();
 
-  // Data/stats focus scores highest
   const dataTerms = ['data', 'algorithm', 'model', 'statistics', 'analysis', 'analytics', 'machine learning', 'ai'];
   const hasDataFocus = dataTerms.some(t => lower.includes(t));
 
-  // Multi-sport mentions
   let sportMentions = 0;
   for (const kw of MULTI_SPORT_KEYWORDS) {
     if (lower.includes(kw)) sportMentions++;
@@ -71,66 +57,25 @@ function scoreFreshness(createdAt: Date): number {
   return 0;
 }
 
-async function classifyIntent(post: RawPost): Promise<{ score: number; label: string }> {
-  const text = `${post.title}\n${post.body}`.slice(0, 500);
-
-  try {
-    const response = await getClient().messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 50,
-      messages: [{
-        role: 'user',
-        content: `Classify this betting forum/social media post into exactly one category. Reply with ONLY the category label, nothing else.
-
-Categories:
-- seeking_tips (asking for picks, signals, communities, or betting help)
-- seeking_community (looking to join a betting group/discord/community)
-- complaining_tipster (frustrated with a tipster or service)
-- sharing_picks (sharing their own picks or analysis)
-- general_discussion (general betting chat, not seeking anything specific)
-- irrelevant (not related to sports betting)
-
-Post: "${text}"`
-      }],
-    });
-
-    const label = (response.content[0] as any).text.trim().toLowerCase();
-
-    const scores: Record<string, number> = {
-      seeking_tips: 30,
-      seeking_community: 28,
-      complaining_tipster: 22,
-      general_discussion: 12,
-      sharing_picks: 8,
-      irrelevant: 0,
-    };
-
-    return {
-      score: scores[label] ?? 10,
-      label: label,
-    };
-  } catch (err: any) {
-    console.error(`[Scoring] Intent classification error: ${err.message}`);
-    return { score: 10, label: 'unknown' };
-  }
-}
-
-export async function scoreRelevance(post: RawPost): Promise<RelevanceScore> {
+/**
+ * Local-only relevance scoring — no AI calls.
+ * Intent classification is deferred to Gecko via the pending_ai queue.
+ */
+export function scoreRelevanceLocal(post: RawPost): RelevanceScore {
   const text = `${post.title} ${post.body}`;
   const keyword = scoreKeywords(text);
   const topic = scoreTopicMatch(text);
   const freshness = scoreFreshness(post.createdAt);
-  const intent = await classifyIntent(post);
   const sports = detectSports(post);
   const regions = detectRegions(post);
 
   return {
     keyword,
-    intent: intent.score,
+    intent: 0, // Gecko fills this in
     topic,
     freshness,
-    total: keyword + intent.score + topic + freshness,
-    intentLabel: intent.label,
+    total: keyword + topic + freshness, // Preliminary score without intent
+    intentLabel: 'pending_gecko',
     detectedSports: sports,
     detectedRegions: regions,
   };

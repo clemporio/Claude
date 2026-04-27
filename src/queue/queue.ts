@@ -82,10 +82,49 @@ export async function initDb(): Promise<void> {
     )
   `);
 
+  // Pending AI — items awaiting Gecko's classification and draft generation
+  db.run(`
+    CREATE TABLE IF NOT EXISTS pending_ai (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      opportunity_id INTEGER NOT NULL,
+      platform TEXT NOT NULL,
+      url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      subreddit TEXT,
+      keyword_score REAL NOT NULL,
+      topic_score REAL NOT NULL,
+      freshness_score REAL NOT NULL,
+      opportunity_score REAL NOT NULL,
+      detected_sports TEXT,
+      detected_regions TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (opportunity_id) REFERENCES opportunities(id)
+    )
+  `);
+
+  // Post history — persists safety rail state across restarts
+  db.run(`
+    CREATE TABLE IF NOT EXISTS post_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      draft_id INTEGER,
+      platform TEXT NOT NULL,
+      subreddit TEXT,
+      had_discord_mention INTEGER NOT NULL DEFAULT 0,
+      posted_url TEXT,
+      posted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      error TEXT,
+      FOREIGN KEY (draft_id) REFERENCES drafts(id)
+    )
+  `);
+
   // Create indexes (safe to run multiple times with IF NOT EXISTS)
   db.run('CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status)');
   db.run('CREATE INDEX IF NOT EXISTS idx_drafts_score ON drafts(combined_score DESC)');
   db.run('CREATE INDEX IF NOT EXISTS idx_opp_platform ON opportunities(platform, external_id)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_post_history_date ON post_history(posted_at)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_pending_ai_status ON pending_ai(status)');
 
   saveDb();
 }
@@ -293,6 +332,188 @@ export function getDailyMetrics(date?: string): DailyMetrics {
   }
 
   return out;
+}
+
+export function recordPostToDb(entry: {
+  draftId?: number;
+  platform: Platform;
+  subreddit?: string;
+  hadDiscordMention: boolean;
+  postedUrl?: string;
+  error?: string;
+}): void {
+  getDb().run(`
+    INSERT INTO post_history (draft_id, platform, subreddit, had_discord_mention, posted_url, error)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `, [
+    entry.draftId || null,
+    entry.platform,
+    entry.subreddit || null,
+    entry.hadDiscordMention ? 1 : 0,
+    entry.postedUrl || null,
+    entry.error || null,
+  ]);
+  saveDb();
+}
+
+export function getPostHistory(days = 7): Array<{
+  platform: Platform;
+  subreddit?: string;
+  hadDiscordMention: boolean;
+  postedAt: number;
+}> {
+  const d = getDb();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const results = d.exec(
+    `SELECT platform, subreddit, had_discord_mention, posted_at
+     FROM post_history
+     WHERE posted_at >= '${cutoff}' AND error IS NULL
+     ORDER BY posted_at DESC`
+  );
+
+  if (!results[0]) return [];
+
+  return results[0].values.map((row: any[]) => ({
+    platform: row[0] as Platform,
+    subreddit: row[1] as string | undefined,
+    hadDiscordMention: row[2] === 1,
+    postedAt: new Date(row[3] as string).getTime(),
+  }));
+}
+
+export function getPostHistoryStats(date?: string): {
+  total: number;
+  byPlatform: Record<Platform, number>;
+  discordMentions: number;
+  subredditsUsed: string[];
+} {
+  const d = date || new Date().toISOString().split('T')[0];
+  const db = getDb();
+  const results = db.exec(
+    `SELECT platform, subreddit, had_discord_mention
+     FROM post_history
+     WHERE date(posted_at) = '${d}' AND error IS NULL`
+  );
+
+  const stats = {
+    total: 0,
+    byPlatform: { reddit: 0, twitter: 0, forum: 0 } as Record<Platform, number>,
+    discordMentions: 0,
+    subredditsUsed: [] as string[],
+  };
+
+  if (!results[0]) return stats;
+
+  const subs = new Set<string>();
+  for (const row of results[0].values) {
+    stats.total++;
+    stats.byPlatform[row[0] as Platform]++;
+    if (row[2] === 1) stats.discordMentions++;
+    if (row[1]) subs.add(row[1] as string);
+  }
+  stats.subredditsUsed = Array.from(subs);
+  return stats;
+}
+
+// --- Pending AI Queue (for Gecko) ---
+
+export function insertPendingAi(item: {
+  opportunityId: number;
+  platform: Platform;
+  url: string;
+  title: string;
+  body: string;
+  subreddit?: string;
+  keywordScore: number;
+  topicScore: number;
+  freshnessScore: number;
+  opportunityScore: number;
+  detectedSports: string[];
+  detectedRegions: string[];
+}): number {
+  const d = getDb();
+  d.run(`
+    INSERT INTO pending_ai
+    (opportunity_id, platform, url, title, body, subreddit,
+     keyword_score, topic_score, freshness_score, opportunity_score,
+     detected_sports, detected_regions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    item.opportunityId, item.platform, item.url, item.title,
+    item.body.slice(0, 2000), item.subreddit || null,
+    item.keywordScore, item.topicScore, item.freshnessScore,
+    item.opportunityScore,
+    JSON.stringify(item.detectedSports),
+    JSON.stringify(item.detectedRegions),
+  ]);
+
+  const result = d.exec('SELECT last_insert_rowid() as id');
+  saveDb();
+  return result[0]?.values[0]?.[0] as number || 0;
+}
+
+export function getPendingAiItems(limit = 20): Array<{
+  id: number;
+  opportunityId: number;
+  platform: Platform;
+  url: string;
+  title: string;
+  body: string;
+  subreddit?: string;
+  keywordScore: number;
+  topicScore: number;
+  freshnessScore: number;
+  opportunityScore: number;
+  detectedSports: string[];
+  detectedRegions: string[];
+}> {
+  const results = getDb().exec(`
+    SELECT id, opportunity_id, platform, url, title, body, subreddit,
+           keyword_score, topic_score, freshness_score, opportunity_score,
+           detected_sports, detected_regions
+    FROM pending_ai
+    WHERE status = 'pending'
+    ORDER BY opportunity_score DESC
+    LIMIT ${limit}
+  `);
+
+  if (!results[0]) return [];
+
+  return results[0].values.map((row: any[]) => ({
+    id: row[0] as number,
+    opportunityId: row[1] as number,
+    platform: row[2] as Platform,
+    url: row[3] as string,
+    title: row[4] as string,
+    body: row[5] as string,
+    subreddit: row[6] as string | undefined,
+    keywordScore: row[7] as number,
+    topicScore: row[8] as number,
+    freshnessScore: row[9] as number,
+    opportunityScore: row[10] as number,
+    detectedSports: JSON.parse(row[11] as string || '[]'),
+    detectedRegions: JSON.parse(row[12] as string || '[]'),
+  }));
+}
+
+export function markPendingAiDone(id: number): void {
+  getDb().run("UPDATE pending_ai SET status = 'done' WHERE id = ?", [id]);
+  saveDb();
+}
+
+export function getPendingAiCount(): number {
+  const results = getDb().exec("SELECT COUNT(*) FROM pending_ai WHERE status = 'pending'");
+  return results[0]?.values[0]?.[0] as number || 0;
+}
+
+export function expireStalePendingAi(maxAgeHours = 6): number {
+  const d = getDb();
+  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
+  d.run(`UPDATE pending_ai SET status = 'expired' WHERE status = 'pending' AND created_at <= '${cutoff}'`);
+  const result = d.exec('SELECT changes()');
+  const changes = result[0]?.values[0]?.[0] as number || 0;
+  if (changes > 0) saveDb();
+  return changes;
 }
 
 export function closeDb(): void {

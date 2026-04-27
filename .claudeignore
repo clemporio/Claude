@@ -1,0 +1,17 @@
+*.pyc
+__pycache__/
+node_modules/
+venv/
+.venv/
+.tmp/
+*.log
+*.zip
+*.tar.gz
+*.xlsx
+*.csv
+*.mp4
+*.apk
+package-lock.json
+Thumbs.db
+desktop.ini
+.DS_Store

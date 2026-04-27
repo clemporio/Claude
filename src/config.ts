@@ -37,6 +37,10 @@ export const config = {
 
   twitter: {
     bearerToken: optional('TWITTER_BEARER_TOKEN', ''),
+    apiKey: optional('TWITTER_API_KEY', ''),
+    apiSecret: optional('TWITTER_API_SECRET', ''),
+    accessToken: optional('TWITTER_ACCESS_TOKEN', ''),
+    accessSecret: optional('TWITTER_ACCESS_SECRET', ''),
     keywords: [
       'betting signals', 'sports picks', 'betting tips', 'free picks',
       'betting discord', 'tipster', 'data betting', 'sports betting model',
@@ -79,12 +83,8 @@ export const config = {
   },
 
   scoring: {
-    relevanceThreshold: num('RELEVANCE_THRESHOLD', 50),
-    opportunityThreshold: num('OPPORTUNITY_THRESHOLD', 40),
-  },
-
-  anthropic: {
-    apiKey: optional('ANTHROPIC_API_KEY', ''),
+    relevanceThreshold: num('RELEVANCE_THRESHOLD', 28),
+    opportunityThreshold: num('OPPORTUNITY_THRESHOLD', 30),
   },
 
   discord: {
@@ -98,6 +98,19 @@ export const config = {
 
   drafting: {
     expiryHours: num('DRAFT_EXPIRY_HOURS', 12),
+  },
+
+  safety: {
+    maxPostsPerDay: num('SAFETY_MAX_POSTS_PER_DAY', 8),
+    maxRedditPostsPerDay: num('SAFETY_MAX_REDDIT_PER_DAY', 4),
+    maxTwitterPostsPerDay: num('SAFETY_MAX_TWITTER_PER_DAY', 15),
+    maxForumPostsPerDay: num('SAFETY_MAX_FORUM_PER_DAY', 2),
+    discordMentionRatio: num('SAFETY_DISCORD_MENTION_RATIO', 4),
+    redditCooldownMinutes: num('SAFETY_REDDIT_COOLDOWN_MIN', 90),
+    twitterCooldownMinutes: num('SAFETY_TWITTER_COOLDOWN_MIN', 20),
+    forumCooldownMinutes: num('SAFETY_FORUM_COOLDOWN_MIN', 120),
+    maxPostsPerSubredditPerDay: num('SAFETY_MAX_PER_SUBREDDIT', 1),
+    subredditCooldownHours: num('SAFETY_SUBREDDIT_COOLDOWN_HR', 24),
   },
 
   db: {

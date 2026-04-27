@@ -12,6 +12,9 @@ export interface RawPost {
   upvotes?: number;
   comments?: number;
   followers?: number;       // Twitter author followers
+  following?: number;       // Twitter author following
+  tweetCount?: number;      // Twitter author total tweets
+  engagementRate?: number;  // This tweet's engagement / follower count
   retweets?: number;
   likes?: number;
   createdAt: Date;
@@ -35,7 +38,7 @@ export interface OpportunityScore {
   positioningFit: number;   // 0-25
   competition: number;      // 0-25
   audienceBonus: number;    // 0-25: timing + terminology fit from audience intelligence
-  total: number;            // 0-125 (normalised to 0-100 in combined score)
+  total: number;            // 0-120 (reach-dominant, normalised in combined score)
 }
 
 export interface ScoredPost extends RawPost {
@@ -44,7 +47,7 @@ export interface ScoredPost extends RawPost {
   combinedScore: number;
 }
 
-export type DraftStatus = 'pending' | 'approved' | 'skipped' | 'expired' | 'posted';
+export type DraftStatus = 'pending' | 'approved' | 'skipped' | 'expired' | 'posted' | 'failed';
 
 export interface Draft {
   id: number;
@@ -77,6 +80,15 @@ export interface DailyMetrics {
     drafted: number;
     approved: number;
   }>;
+}
+
+export interface PostResult {
+  success: boolean;
+  platform: Platform;
+  postedUrl?: string;
+  error?: string;
+  safetyBlocked?: boolean;
+  safetyReason?: string;
 }
 
 export interface ForumTarget {

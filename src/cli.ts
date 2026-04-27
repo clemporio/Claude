@@ -1,6 +1,8 @@
 import readline from 'readline';
-import { initDb, getPendingDrafts, updateDraftStatus, getDailyMetrics, expireOldDrafts } from './queue/queue';
-import type { Draft } from './types';
+import { initDb, closeDb, getPendingDrafts, updateDraftStatus, getDailyMetrics, expireOldDrafts, getPendingAiItems, markPendingAiDone, insertDraft, incrementMetric, getPostHistory, recordPostToDb } from './queue/queue';
+import { postDraft } from './posting/poster';
+import { loadPostHistory } from './safety/rails';
+import type { Draft, Platform } from './types';
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -150,12 +152,143 @@ async function main(): Promise<void> {
     const metrics = getDailyMetrics();
     console.log(JSON.stringify(metrics, null, 2));
     rl.close();
+    closeDb();
+    return;
+  }
+
+  if (args[0] === 'pending-ai') {
+    // JSON output of pending AI items for Gecko
+    const items = getPendingAiItems(20);
+    console.log(JSON.stringify(items, null, 2));
+    rl.close();
+    closeDb();
+    return;
+  }
+
+  if (args[0] === 'write-draft') {
+    // Gecko writes a draft back: write-draft <json>
+    // JSON: { pendingId, opportunityId, platform, postUrl, postTitle, intentLabel, draftText, alternateText? }
+    const jsonStr = args.slice(1).join(' ');
+    try {
+      const data = JSON.parse(jsonStr);
+      if (!data.pendingId || !data.opportunityId || !data.draftText) {
+        console.error('{"error": "Required: pendingId, opportunityId, draftText"}');
+        process.exit(1);
+      }
+
+      const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+
+      insertDraft({
+        opportunityId: data.opportunityId,
+        platform: (data.platform || 'reddit') as Platform,
+        postUrl: data.postUrl || '',
+        postTitle: data.postTitle || '',
+        postBody: '',
+        draftText: data.draftText,
+        alternateText: data.alternateText,
+        relevanceScore: data.relevanceScore || 0,
+        opportunityScore: data.opportunityScore || 0,
+        combinedScore: data.combinedScore || 0,
+      });
+
+      markPendingAiDone(data.pendingId);
+      incrementMetric((data.platform || 'reddit') as Platform, 'drafts_generated');
+
+      console.log(JSON.stringify({ success: true, pendingId: data.pendingId, opportunityId: data.opportunityId }));
+    } catch (err: any) {
+      console.error(JSON.stringify({ error: err.message }));
+      process.exit(1);
+    }
+    rl.close();
+    closeDb();
+    return;
+  }
+
+  if (args[0] === 'post') {
+    // Post a specific draft by ID, or post top N pending drafts
+    // Usage: post <draft_id> OR post --top <N>
+    // Loads safety rail state, checks limits, posts via API
+    const history = getPostHistory(7);
+    loadPostHistory(history);
+
+    if (args[1] === '--top') {
+      const count = parseInt(args[2]) || 3;
+      const drafts = getPendingDrafts(count);
+      if (drafts.length === 0) {
+        console.log(JSON.stringify({ error: 'No pending drafts to post' }));
+        rl.close();
+        closeDb();
+        return;
+      }
+      const results = [];
+      for (const draft of drafts) {
+        const result = await postDraft(draft, draft.platform === 'reddit' ? extractSubreddit(draft.postUrl) : undefined);
+        if (result.success) {
+          updateDraftStatus(draft.id, 'posted');
+          incrementMetric(draft.platform, 'drafts_approved');
+        } else if (result.safetyBlocked) {
+          // Safety blocked — stop trying more, limits are hit
+          results.push({ draftId: draft.id, ...result });
+          break;
+        } else {
+          updateDraftStatus(draft.id, 'failed');
+        }
+        results.push({ draftId: draft.id, ...result });
+      }
+      console.log(JSON.stringify(results, null, 2));
+    } else {
+      const draftId = parseInt(args[1]);
+      if (isNaN(draftId)) {
+        console.error(JSON.stringify({ error: 'Usage: post <draft_id> OR post --top <N>' }));
+        process.exit(1);
+      }
+      const drafts = getPendingDrafts(100);
+      const draft = drafts.find(d => d.id === draftId);
+      if (!draft) {
+        console.error(JSON.stringify({ error: `Draft ${draftId} not found or not pending` }));
+        process.exit(1);
+      }
+      const result = await postDraft(draft, draft.platform === 'reddit' ? extractSubreddit(draft.postUrl) : undefined);
+      if (result.success) {
+        updateDraftStatus(draft.id, 'posted');
+        incrementMetric(draft.platform, 'drafts_approved');
+      } else {
+        updateDraftStatus(draft.id, 'failed');
+      }
+      console.log(JSON.stringify({ draftId: draft.id, ...result }, null, 2));
+    }
+    rl.close();
+    closeDb();
+    return;
+  }
+
+  if (args[0] === 'list') {
+    // List pending drafts as JSON for Gecko
+    const drafts = getPendingDrafts(20);
+    const summary = drafts.map(d => ({
+      id: d.id,
+      platform: d.platform,
+      score: d.combinedScore,
+      postUrl: d.postUrl,
+      title: d.postTitle?.slice(0, 80),
+      draft: d.draftText.slice(0, 200),
+      hasAlternate: !!d.alternateText,
+    }));
+    console.log(JSON.stringify(summary, null, 2));
+    rl.close();
+    closeDb();
     return;
   }
 
   console.log('\nScout Bot — Draft Review Queue\n');
   await showQueue();
   rl.close();
+  closeDb();
+}
+
+function extractSubreddit(url: string): string | undefined {
+  const match = url.match(/reddit\.com\/r\/([^/]+)/);
+  return match?.[1];
 }
 
 main().catch(err => {

@@ -1,21 +1,21 @@
 import cron from 'node-cron';
 import { config } from './config';
-import { initDb, expireOldDrafts, incrementMetric, insertOpportunity, insertDraft } from './queue/queue';
+import { initDb, closeDb, expireOldDrafts, expireStalePendingAi, incrementMetric, insertOpportunity, insertPendingAi, getPostHistory } from './queue/queue';
 import { scanReddit } from './monitors/reddit';
 import { scanTwitter } from './monitors/twitter';
 import { scanForums } from './monitors/forums';
-import { scoreRelevance } from './scoring/relevance';
+import { scoreRelevanceLocal } from './scoring/relevance';
 import { scoreOpportunity } from './scoring/opportunity';
-import { generateDrafts } from './drafting/drafter';
-import type { RawPost, ScoredPost, Platform } from './types';
+import { loadPostHistory } from './safety/rails';
+import type { RawPost, Platform } from './types';
 
 async function processPosts(posts: RawPost[]): Promise<void> {
   console.log(`[Pipeline] Processing ${posts.length} raw posts...`);
 
   for (const post of posts) {
     try {
-      // Score relevance
-      const relevance = await scoreRelevance(post);
+      // Score relevance (keyword + topic + freshness only — no AI)
+      const relevance = scoreRelevanceLocal(post);
       incrementMetric(post.platform, 'posts_scored');
 
       if (relevance.total < config.scoring.relevanceThreshold) {
@@ -29,9 +29,8 @@ async function processPosts(posts: RawPost[]): Promise<void> {
         continue;
       }
 
-      // Normalise: relevance is 0-100, opportunity is 0-125 (with audience bonus)
-      // Combined score is weighted average, normalised to 0-100
-      const combinedScore = (relevance.total * 0.45) + (Math.min(opportunity.total, 125) / 125 * 100 * 0.55);
+      // Combined score — opportunity (reach-heavy) weighted more than relevance
+      const combinedScore = (relevance.total * 0.3) + (Math.min(opportunity.total, 120) / 120 * 100 * 0.7);
 
       // Store opportunity
       const oppId = insertOpportunity({
@@ -46,37 +45,29 @@ async function processPosts(posts: RawPost[]): Promise<void> {
         relevanceScore: relevance.total,
         opportunityScore: opportunity.total,
         combinedScore,
-        intentLabel: relevance.intentLabel,
+        intentLabel: 'pending_gecko',
         createdAt: post.createdAt.toISOString(),
       });
 
       if (oppId === 0) continue; // Already exists
 
-      // Generate drafts
-      const scored: ScoredPost = {
-        ...post,
-        relevance,
-        opportunity,
-        combinedScore,
-      };
-
-      const drafts = await generateDrafts(scored);
-
-      insertDraft({
+      // Queue for Gecko's AI processing (intent classification + draft generation)
+      insertPendingAi({
         opportunityId: oppId,
         platform: post.platform,
-        postUrl: post.url,
-        postTitle: post.title,
-        postBody: post.body,
-        draftText: drafts.primary,
-        alternateText: drafts.alternate,
-        relevanceScore: relevance.total,
+        url: post.url,
+        title: post.title,
+        body: post.body,
+        subreddit: post.subreddit,
+        keywordScore: relevance.keyword,
+        topicScore: relevance.topic,
+        freshnessScore: relevance.freshness,
         opportunityScore: opportunity.total,
-        combinedScore,
+        detectedSports: relevance.detectedSports,
+        detectedRegions: relevance.detectedRegions,
       });
 
-      incrementMetric(post.platform, 'drafts_generated');
-      console.log(`[Pipeline] Draft created for ${post.platform} post: ${post.title.slice(0, 60)}... (score: ${combinedScore.toFixed(0)})`);
+      console.log(`[Pipeline] Queued for Gecko: ${post.platform} post: ${post.title.slice(0, 60)}... (prelim score: ${combinedScore.toFixed(0)})`);
     } catch (err: any) {
       console.error(`[Pipeline] Error processing post ${post.externalId}: ${err.message}`);
     }
@@ -114,9 +105,13 @@ async function runForumScan(): Promise<void> {
 }
 
 function runExpiry(): void {
-  const expired = expireOldDrafts();
-  if (expired > 0) {
-    console.log(`[Scheduler] Expired ${expired} stale drafts`);
+  const expiredDrafts = expireOldDrafts();
+  if (expiredDrafts > 0) {
+    console.log(`[Scheduler] Expired ${expiredDrafts} stale drafts`);
+  }
+  const expiredAi = expireStalePendingAi(6);
+  if (expiredAi > 0) {
+    console.log(`[Scheduler] Expired ${expiredAi} stale pending_ai items (>6h old)`);
   }
 }
 
@@ -156,11 +151,28 @@ function startScheduler(): void {
 async function main(): Promise<void> {
   console.log('[Scout Bot] Initializing...');
   await initDb();
+
+  // Load post history into safety rails so limits survive restarts
+  const history = getPostHistory(7);
+  loadPostHistory(history);
+  console.log(`[Scout Bot] Loaded ${history.length} post history records into safety rails`);
+
   startScheduler();
   console.log('[Scout Bot] Running. Press Ctrl+C to stop.');
 }
 
+// Graceful shutdown — flush DB before exit
+function shutdown(signal: string): void {
+  console.log(`[Scout Bot] ${signal} received, shutting down...`);
+  closeDb();
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 main().catch(err => {
   console.error('[Scout Bot] Fatal error:', err);
+  closeDb();
   process.exit(1);
 });
